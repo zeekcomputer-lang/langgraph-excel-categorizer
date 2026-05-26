@@ -47,18 +47,37 @@ COL_FILE = "파일명"
 # 분류 기준
 CATEGORIES_JSON = ROOT / "categories.json"
 
-# OpenAI 호환 엔드포인트 (하드코딩 가능, 미지정 시 환경변수)
-OPENAI_BASE_URL: Optional[str] = os.getenv("OPENAI_BASE_URL")  # 예: "https://api.openai.com/v1"
-OPENAI_API_KEY: Optional[str] = os.getenv("OPENAI_API_KEY")
-OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+# ─────────────────────────────────────────────────────────────────────────
+# OpenAI 호환 엔드포인트 설정
+# ─────────────────────────────────────────────────────────────────────────
+# [HARDCODE HERE] 아래 placeholder 를 실제 값으로 교체하면 환경변수 없이 동작합니다.
+# 환경변수(OPENAI_BASE_URL / OPENAI_API_KEY / OPENAI_MODEL) 가 설정되어 있으면 그 값이 우선.
+# 두 방식 다 사용 가능하며, 아래 None / 빈 문자열을 실제 값으로 바꾸면 하드코딩 완료.
 
-# 추가 헤더 (하드코딩 가능)
+# 예) OPENAI_BASE_URL = "https://api.openai.com/v1"
+# 예) OPENAI_BASE_URL = "https://your-internal-gateway.example.com/v1"
+OPENAI_BASE_URL: Optional[str] = os.getenv("OPENAI_BASE_URL") or None  # <-- HARDCODE
+
+# 예) OPENAI_API_KEY = "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+OPENAI_API_KEY: Optional[str] = os.getenv("OPENAI_API_KEY") or None  # <-- HARDCODE
+
+# 예) OPENAI_MODEL = "gpt-4o-mini"  /  "gpt-4o"  /  "내부-모델-id"
+OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")  # <-- HARDCODE
+
+# ─────────────────────────────────────────────────────────────────────────
+# 추가 HTTP 헤더 (AsyncOpenAI default_headers 로 주입됨)
+# ─────────────────────────────────────────────────────────────────────────
+# [HARDCODE HERE] 아래 dict 의 주석을 해제하고 실제 헤더 값으로 교체하세요.
+# 환경변수 OPENAI_EXTRA_HEADERS (JSON 문자열) 를 추가로 병합할 수 있습니다.
 DEFAULT_HEADERS: Dict[str, str] = {
-    # 예시: 사용자가 직접 수정
-    # "X-Project-Id": "langgraph-excel-categorizer",
-    # "X-Tenant": "default",
+    # "Authorization":   "Bearer <YOUR_TOKEN_HERE>",          # (필요 시) 별도 인증 헤더
+    # "X-API-Key":       "<YOUR_API_KEY_HERE>",               # (필요 시) 게이트웨이 API Key
+    # "X-Project-Id":    "<YOUR_PROJECT_ID>",                 # 프로젝트 식별
+    # "X-Tenant":        "<YOUR_TENANT_ID>",                  # 멀티 테넌트
+    # "X-Request-Source": "langgraph-excel-categorizer",      # 호출 출처 태깅
+    # "User-Agent":      "langgraph-excel-categorizer/1.0",
 }
-# 환경변수 OPENAI_EXTRA_HEADERS (JSON 문자열) 가 있으면 병합
+# 환경변수 병합 (선택)
 _extra = os.getenv("OPENAI_EXTRA_HEADERS")
 if _extra:
     try:
