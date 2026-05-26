@@ -10,6 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 VENV_DIR = ROOT / ".venv"
 REQ = ROOT / "requirements.txt"
+REQ_WIN = ROOT / "requirements-windows.txt"
 
 
 def venv_python() -> Path:
@@ -40,22 +41,34 @@ def main() -> int:
     if rc != 0:
         return rc
 
-    if REQ.exists():
-        print(f"[setup] 의존성 설치: {REQ.name}")
-        rc = subprocess.call([str(py), "-m", "pip", "install", "-r", str(REQ)])
+    # Windows에서는 xlwings 포함 requirements-windows.txt 우선 사용
+    req_file = REQ_WIN if (os.name == "nt" and REQ_WIN.exists()) else REQ
+    if req_file.exists():
+        print(f"[setup] 의존성 설치: {req_file.name}")
+        rc = subprocess.call([str(py), "-m", "pip", "install", "-r", str(req_file)])
         if rc != 0:
             return rc
     else:
-        print("[WARN] requirements.txt 없음")
+        print("[WARN] requirements 파일 없음")
 
-    print("[setup] 검증: import langgraph, openai, pandas, openpyxl")
+    print("[setup] 검증: 공통 패키지 import")
     rc = subprocess.call([
         str(py), "-c",
-        "import langgraph, openai, pandas, openpyxl; print('OK', langgraph.__version__)"
+        "import langgraph, openai, pandas, openpyxl; print('OK langgraph', langgraph.__version__)"
     ])
     if rc != 0:
-        print("[ERROR] 패키지 검증 실패")
+        print("[ERROR] 공통 패키지 검증 실패")
         return rc
+
+    if os.name == "nt":
+        print("[setup] 검증: xlwings (Windows)")
+        rc = subprocess.call([
+            str(py), "-c",
+            "import xlwings; print('OK xlwings', xlwings.__version__)"
+        ])
+        if rc != 0:
+            print("[WARN] xlwings 미설치/실패 — pandas 폴백으로만 동작합니다")
+            print("       Excel COM 사용 시: pip install -r requirements-windows.txt")
 
     print("\n[OK] 셋업 완료")
     return 0
