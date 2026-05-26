@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "description": "카테고리 분류 기준. 사용자가 직접 수정. LLM이 이 JSON을 컨텍스트로 받아 분류함.",
+  "categories": [
+    {
+      "name": "대기",
+      "description": "아직 작업이 시작되지 않은 상태",
+      "examples": [
+        {"진행단계": "접수", "파일명": "request_001.pdf"},
+        {"진행단계": "대기", "파일명": "draft_review.docx"}
+      ]
+    },
+    {
+      "name": "진행중",
+      "description": "현재 작업이 수행되고 있는 상태 (작성, 검토, 리뷰 포함)",
+      "examples": [
+        {"진행단계": "작성중", "파일명": "report_v2.docx"},
+        {"진행단계": "검토중", "파일명": "spec_draft.xlsx"}
+      ]
+    },
+    {
+      "name": "완료",
+      "description": "작업이 종료/승인된 상태",
+      "examples": [
+        {"진행단계": "승인", "파일명": "final_report.pdf"},
+        {"진행단계": "완료", "파일명": "release_v1.0.docx"}
+      ]
+    },
+    {
+      "name": "보류",
+      "description": "일시 중지/보류된 상태",
+      "examples": [
+        {"진행단계": "보류", "파일명": "pending_xyz.docx"}
+      ]
+    },
+    {
+      "name": "오류",
+      "description": "에러/반려/실패 상태",
+      "examples": [
+        {"진행단계": "반려", "파일명": "rejected_001.pdf"},
+        {"진행단계": "오류", "파일명": "error_log.xlsx"}
+      ]
+    }
+  ],
+  "default_category": "기타",
+  "review": {
+    "enabled": true,
+    "instruction": "분류된 전체 결과를 점검하여 오분류 의심 항목을 찾아 플래그한다. 동일/유사 항목이 다른 카테고리에 배치된 경우 우선 검출."
+  }
+}
