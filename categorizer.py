@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TypedDict
 
@@ -61,8 +62,10 @@ OPENAI_BASE_URL: Optional[str] = os.getenv("OPENAI_BASE_URL") or None  # <-- HAR
 # 예) OPENAI_API_KEY = "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 OPENAI_API_KEY: Optional[str] = os.getenv("OPENAI_API_KEY") or None  # <-- HARDCODE
 
-# 예) OPENAI_MODEL = "gpt-4o-mini"  /  "gpt-4o"  /  "내부-모델-id"
-OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")  # <-- HARDCODE
+# 예) OPENAI_MODEL = "gpt-oss-20b"  /  "gpt-oss-120b"  /  "내부-모델-id"
+# 본 파이프라인은 GPT-OSS(오픈소스/로컬) 모델 사용을 전제로 함.
+# → response_format 인자 미지원. JSON 출력은 프롬프트 + 파서로 강제.
+OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-oss-20b")  # <-- HARDCODE
 
 # ─────────────────────────────────────────────────────────────────────────
 # 추가 HTTP 헤더 (AsyncOpenAI default_headers 로 주입됨)
@@ -191,6 +194,150 @@ def project_columns(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# 5-0. JSON Extractor — GPT-OSS 응답에서 JSON 강제 추출
+# ──────────────────────────────────────────────────────────────────────────────
+# GPT-OSS 계열은 `response_format={"type":"json_object"}` 인자를 지원하지 않음.
+# 따라서 모델 응답에 코드펜스/설명문/잡담이 섞일 수 있으며,
+# 아래 extractor 가 다단계 폴백으로 첫 번째 유효 JSON 객체를 추출한다.
+#
+# 폴백 순서:
+#   1) 그대로 json.loads
+#   2) ```json ... ``` 또는 ``` ... ``` 코드펜스 내부
+#   3) 중괄호 균형 스캔으로 첫 최상위 {...} 블록 추출
+#   4) 모두 실패 시 ValueError
+# ──────────────────────────────────────────────────────────────────────────────
+_CODE_FENCE = re.compile(r"```(?:json)?\s*(\{.*?\}|\[.*?\])\s*```", re.DOTALL | re.IGNORECASE)
+
+
+def _scan_balanced_json(text: str) -> Optional[str]:
+    """중괄호/대괄호 균형 스캔으로 첫 최상위 JSON 블록 추출."""
+    start = -1
+    open_ch = ""
+    close_ch = ""
+    for i, ch in enumerate(text):
+        if ch in "{[":
+            start = i
+            open_ch = ch
+            close_ch = "}" if ch == "{" else "]"
+            break
+    if start < 0:
+        return None
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+            continue
+        if ch == open_ch:
+            depth += 1
+        elif ch == close_ch:
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return None
+
+
+def extract_json(text: str, *, expect: str = "object") -> Any:
+    """GPT-OSS 응답에서 JSON 추출. expect='object' | 'array'.
+    실패 시 ValueError(원문 일부 포함) 발생.
+    """
+    if text is None:
+        raise ValueError("LLM 응답이 None")
+    text = text.strip()
+    if not text:
+        raise ValueError("LLM 응답이 빈 문자열")
+
+    # 1) 그대로 파싱
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # 2) 코드펜스
+    m = _CODE_FENCE.search(text)
+    if m:
+        try:
+            return json.loads(m.group(1))
+        except json.JSONDecodeError:
+            pass
+
+    # 3) 균형 스캔
+    block = _scan_balanced_json(text)
+    if block:
+        try:
+            return json.loads(block)
+        except json.JSONDecodeError:
+            pass
+
+    preview = text[:300].replace("\n", "\\n")
+    raise ValueError(f"LLM 응답에서 JSON 추출 실패 (expect={expect}): {preview!r}")
+
+
+async def llm_chat_json(
+    *,
+    system: str,
+    user: str,
+    expect: str = "object",
+    temperature: float = 0.1,
+    max_retries: int = 2,
+) -> Any:
+    """GPT-OSS 호환 JSON-강제 LLM 호출.
+
+    - response_format 인자를 사용하지 않음 (GPT-OSS 미지원).
+    - 프롬프트에 JSON-only 가이드를 명시하고, 응답은 extract_json 으로 파싱.
+    - 파싱 실패 시 '직전 출력은 JSON 이 아니었음. JSON 만 다시 출력하라' 메시지로 재시도.
+    """
+    json_guard = (
+        "\n\n[출력 규약 — 엄수]\n"
+        f"- 응답은 오직 하나의 JSON {expect} 만 출력한다.\n"
+        "- 코드펜스(```), 설명, 머리말/꼬리말, 사고 과정 출력 금지.\n"
+        "- 응답의 첫 문자는 '{' 또는 '[' 이어야 한다.\n"
+        "- 키/문자열은 모두 큰따옴표 사용. 후행 콤마 금지.\n"
+    )
+    messages: List[Dict[str, str]] = [
+        {"role": "system", "content": system + json_guard},
+        {"role": "user", "content": user},
+    ]
+
+    last_err: Optional[Exception] = None
+    last_raw: str = ""
+    for attempt in range(max_retries + 1):
+        response = await client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=messages,
+            temperature=temperature,
+        )
+        last_raw = response.choices[0].message.content or ""
+        try:
+            return extract_json(last_raw, expect=expect)
+        except ValueError as e:
+            last_err = e
+            # 재시도: 직전 응답을 보여주고 JSON-only 재요청
+            messages.append({"role": "assistant", "content": last_raw})
+            messages.append({
+                "role": "user",
+                "content": (
+                    "직전 응답은 유효한 JSON 이 아니다. "
+                    f"동일 작업을 다시 수행하되, 오직 하나의 JSON {expect} 만 출력하라. "
+                    "코드펜스/설명/머리말 모두 금지."
+                ),
+            })
+            print(f"[llm][retry {attempt + 1}/{max_retries}] JSON 파싱 실패: {e}")
+
+    raise RuntimeError(f"LLM JSON 응답 확보 실패 ({max_retries}회 재시도 후): {last_err}")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # 5. LLM 호출 (async)
 # ──────────────────────────────────────────────────────────────────────────────
 async def llm_categorize_with_criteria(
@@ -215,27 +362,28 @@ async def llm_categorize_with_criteria(
         "2. 어떤 카테고리에도 명확히 부합하지 않으면 default_category 로 분류.\n"
         "3. examples 와 description 을 모두 참고.\n"
         f"4. 허용 카테고리 목록: {allowed}\n\n"
-        "응답 형식 (JSON 객체 하나):\n"
-        '{"카테고리명": [index 정수, ...], ...}\n\n'
+        "응답 형식 (JSON 객체 1개, 그 외 텍스트 절대 금지):\n"
+        '{"카테고리명": [index 정수, ...], ...}\n'
+        "예) {\"진행중\": [0, 2], \"완료\": [1], \"기타\": [3]}\n\n"
         "[분류 기준 JSON]\n"
         + json.dumps(criteria, ensure_ascii=False, indent=2)
     )
 
-    response = await client.chat.completions.create(
-        model=OPENAI_MODEL,
-        response_format={"type": "json_object"},
-        messages=[
-            {"role": "system", "content": sys_prompt},
-            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-        ],
+    mapping: Dict[str, List[int]] = await llm_chat_json(
+        system=sys_prompt,
+        user=json.dumps(payload, ensure_ascii=False),
+        expect="object",
         temperature=0.1,
     )
-    raw = response.choices[0].message.content or "{}"
-    mapping: Dict[str, List[int]] = json.loads(raw)
+
+    if not isinstance(mapping, dict):
+        raise ValueError(f"분류 응답이 객체가 아님: {type(mapping).__name__}")
 
     result: Dict[str, List[Dict[str, Any]]] = {}
     for cat, idx_list in mapping.items():
-        result[cat] = [rows[i] for i in idx_list if isinstance(i, int) and 0 <= i < len(rows)]
+        if not isinstance(idx_list, list):
+            continue
+        result[str(cat)] = [rows[i] for i in idx_list if isinstance(i, int) and 0 <= i < len(rows)]
     return result
 
 
@@ -280,20 +428,20 @@ async def llm_review_classification(
         + json.dumps(criteria, ensure_ascii=False, indent=2)
     )
 
-    response = await client.chat.completions.create(
-        model=OPENAI_MODEL,
-        response_format={"type": "json_object"},
-        messages=[
-            {"role": "system", "content": sys_prompt},
-            {"role": "user", "content": json.dumps(flat, ensure_ascii=False)},
-        ],
+    parsed = await llm_chat_json(
+        system=sys_prompt,
+        user=json.dumps(flat, ensure_ascii=False),
+        expect="object",
         temperature=0.1,
     )
-    raw = response.choices[0].message.content or "{}"
-    parsed = json.loads(raw)
+
+    if not isinstance(parsed, dict):
+        parsed = {"flags": [], "summary": f"검증 응답 형식 오류: {type(parsed).__name__}"}
 
     enriched = []
-    for flag in parsed.get("flags", []):
+    for flag in parsed.get("flags", []) or []:
+        if not isinstance(flag, dict):
+            continue
         i = flag.get("index")
         if isinstance(i, int) and i in index_map:
             fname, cat, item = index_map[i]
